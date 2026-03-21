@@ -1,0 +1,61 @@
+bundle:
+  name: maint_bot_app
+
+resources:
+  apps:
+    maint_bot_app:
+      name: "maint-bot-app"
+      description: "MaintBot — Manufacturing Maintenance Assistant with Lakebase persistence"
+      source_code_path: ./
+      config:
+        command: ["uv", "run", "start-app"]
+        env:
+          - name: MLFLOW_TRACKING_URI
+            value: "databricks"
+          - name: MLFLOW_REGISTRY_URI
+            value: "databricks-uc"
+          - name: API_PROXY
+            value: "http://localhost:8000/invocations"
+          - name: CHAT_APP_PORT
+            value: "3000"
+          - name: CHAT_PROXY_TIMEOUT_SECONDS
+            value: "300"
+          - name: MLFLOW_EXPERIMENT_ID
+            value: "4015809073496861"
+          # Lakebase autoscaling config
+          - name: LAKEBASE_AUTOSCALING_PROJECT
+            value: "lakebase-mfg-epl"
+          - name: LAKEBASE_AUTOSCALING_BRANCH
+            value: "production"
+          # MaintBot config
+          - name: DATABASE_NAME
+            value: "mfg_maintenance_db"
+          - name: LLM_ENDPOINT
+            value: "databricks-claude-sonnet-4-5"
+          - name: EMBEDDING_ENDPOINT
+            value: "databricks-gte-large-en"
+          - name: COMPACT_STRATEGY
+            value: "summarize"
+          - name: COMPACT_THRESHOLD
+            value: "0.8"
+          - name: COMPACT_KEEP_TURNS
+            value: "5"
+
+      # Autoscaling postgres resource must be added via API after deploy
+      # See: scripts/grant_lakebase_permissions.py
+
+targets:
+  dev:
+    mode: development
+    default: true
+    workspace:
+      host: https://fevm-serverless-stable-trvrmk.cloud.databricks.com
+
+  prod:
+    mode: production
+    workspace:
+      host: https://fevm-serverless-stable-trvrmk.cloud.databricks.com
+    resources:
+      apps:
+        maint_bot_app:
+          name: maint-bot-app

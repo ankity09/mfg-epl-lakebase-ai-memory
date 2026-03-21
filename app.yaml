@@ -1,0 +1,31 @@
+command: ["uv", "run", "start-server"]
+
+env:
+  - name: MLFLOW_TRACKING_URI
+    value: "databricks"
+  - name: MLFLOW_REGISTRY_URI
+    value: "databricks-uc"
+  - name: API_PROXY
+    value: "http://localhost:8000/invocations"
+  - name: CHAT_APP_PORT
+    value: "3000"
+  - name: CHAT_PROXY_TIMEOUT_SECONDS
+    value: "300"
+  - name: MLFLOW_EXPERIMENT_ID
+    value: "4015809073496861"
+  # Lakebase autoscaling config
+  - name: LAKEBASE_AUTOSCALING_ENDPOINT
+    value: "projects/lakebase-mfg-epl/branches/production/endpoints/primary"
+  # MaintBot config
+  - name: DATABASE_NAME
+    value: "mfg_maintenance_db"
+  - name: LLM_ENDPOINT
+    value: "databricks-claude-sonnet-4-5"
+  - name: EMBEDDING_ENDPOINT
+    value: "databricks-gte-large-en"
+  - name: COMPACT_STRATEGY
+    value: "summarize"
+  - name: COMPACT_THRESHOLD
+    value: "0.8"
+  - name: COMPACT_KEEP_TURNS
+    value: "5"
