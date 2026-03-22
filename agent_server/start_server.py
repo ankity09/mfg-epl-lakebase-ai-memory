@@ -41,7 +41,7 @@ _ensure_mlflow_experiment()
 # Need to import the agent to register the functions with the server
 import agent_server.agent  # noqa: E402, F401
 
-agent_server = AgentServer("ResponsesAgent", enable_chat_proxy=True)
+agent_server = AgentServer("ResponsesAgent", enable_chat_proxy=True)  # proxies /, /assets/*, /api/* to frontend on CHAT_APP_PORT
 
 # Define the app as a module level variable to enable multiple workers
 app = agent_server.app  # noqa: F841

@@ -1,48 +1,34 @@
 """
 LangGraph @tool wrappers for memory operations.
 
-These tools are passed to create_agent(tools=...) so the agent
-can decide when to recall, save, and manage memories.
-
-The technician_id and user_id are injected via custom_inputs in the
-agent state — the LLM does NOT need to provide UUIDs.
+Memory tools resolve technician identity from the user_id passed in custom_inputs
+by looking up the technicians table directly.
 """
 
 import json
 import logging
 from typing import Optional
 
-from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
-
-from agent_server.gdpr import (
-    delete_all_memories,
-    delete_memory,
-    export_memories,
-    view_memories,
-)
-from agent_server.memory import (
-    format_memories_for_prompt,
-    process_conversation_memories,
-    retrieve_memories_hybrid,
-)
 
 logger = logging.getLogger(__name__)
 
 
-def _get_context_ids(config: RunnableConfig) -> tuple[str, str, str]:
-    """Extract technician_id, user_id, work_order_id from tool config."""
-    ci = config.get("configurable", {}).get("custom_inputs", {})
-    tech_id = ci.get("technician_id", "")
-    user_id = ci.get("user_id", "anonymous")
-    wo_id = ci.get("work_order_id", "")
-    return tech_id, user_id, wo_id
+async def _resolve_technician(user_id: str = "anonymous"):
+    """Resolve technician_id from user_id. Returns (tech_id, user_id) or (None, user_id)."""
+    try:
+        from agent_server.db_schema import get_or_create_technician
+        tech = await get_or_create_technician(user_id)
+        return str(tech["id"]), user_id
+    except Exception as e:
+        logger.warning(f"Could not resolve technician for '{user_id}': {e}")
+        return None, user_id
 
 
 @tool
 async def get_maintenance_memory(
     query: str,
-    config: RunnableConfig,
+    user_id: str = "anonymous",
     limit: int = 5,
 ) -> str:
     """Search long-term maintenance knowledge for relevant information.
@@ -52,16 +38,16 @@ async def get_maintenance_memory(
 
     Args:
         query: What to search for (e.g., "HP-L4-001 hydraulic issues")
+        user_id: The technician's user ID (default: anonymous)
         limit: Maximum number of memories to return (default 5)
     """
-    tech_id, _, _ = _get_context_ids(config)
+    tech_id, _ = await _resolve_technician(user_id)
     if not tech_id:
-        return "Cannot search memories: technician context not available."
+        return "No maintenance knowledge available yet."
 
+    from agent_server.memory import format_memories_for_prompt, retrieve_memories_hybrid
     memories = await retrieve_memories_hybrid(
-        technician_id=tech_id,
-        query=query,
-        limit=limit,
+        technician_id=tech_id, query=query, limit=limit,
     )
     if not memories:
         return "No relevant maintenance knowledge found for this query."
@@ -71,25 +57,25 @@ async def get_maintenance_memory(
 @tool
 async def save_maintenance_memory(
     conversation_text: str,
-    config: RunnableConfig,
+    user_id: str = "anonymous",
 ) -> str:
     """Extract and save important maintenance knowledge from a conversation.
 
     Use this tool at the end of a diagnostic session to preserve learnings
-    for future reference. It automatically extracts failure modes, part
-    preferences, procedures, and equipment quirks.
+    for future reference.
 
     Args:
         conversation_text: The conversation to extract knowledge from
+        user_id: The technician's user ID
     """
-    tech_id, _, wo_id = _get_context_ids(config)
+    tech_id, _ = await _resolve_technician(user_id)
     if not tech_id:
-        return "Cannot save memories: technician context not available."
+        return "Cannot save memories: user context not available."
 
+    from agent_server.memory import process_conversation_memories
     result = await process_conversation_memories(
         technician_id=tech_id,
         conversation_text=conversation_text,
-        work_order_id=wo_id or None,
     )
     return (
         f"Memory extraction complete: {result['extracted']} items found, "
@@ -99,12 +85,15 @@ async def save_maintenance_memory(
 
 
 @tool
-async def gdpr_view_memories(config: RunnableConfig) -> str:
-    """View all stored maintenance memories for the current technician (GDPR Art. 15).
+async def gdpr_view_memories(user_id: str = "anonymous") -> str:
+    """View all stored maintenance memories for a technician (GDPR Art. 15).
 
     Use this when a technician asks to see what data is stored about them.
+
+    Args:
+        user_id: The technician's user ID
     """
-    _, user_id, _ = _get_context_ids(config)
+    from agent_server.gdpr import view_memories
     memories = await view_memories(user_id)
     if not memories:
         return f"No stored memories found for user '{user_id}'."
@@ -121,20 +110,18 @@ async def gdpr_view_memories(config: RunnableConfig) -> str:
 
 @tool
 async def gdpr_delete_memories(
-    config: RunnableConfig,
+    user_id: str = "anonymous",
     memory_id: Optional[str] = None,
     delete_all: bool = False,
 ) -> str:
-    """Delete stored maintenance memories for the current technician (GDPR Art. 17).
-
-    Use this when a technician requests deletion of their stored data.
-    Can delete a specific memory by ID or all memories.
+    """Delete stored maintenance memories for a technician (GDPR Art. 17).
 
     Args:
+        user_id: The technician's user ID
         memory_id: Specific memory ID to delete (optional)
         delete_all: If True, delete all memories for this user
     """
-    _, user_id, _ = _get_context_ids(config)
+    from agent_server.gdpr import delete_all_memories, delete_memory
     if delete_all:
         count = await delete_all_memories(user_id)
         return f"Deleted all {count} memories for user '{user_id}'."
@@ -142,17 +129,18 @@ async def gdpr_delete_memories(
         success = await delete_memory(user_id, memory_id)
         if success:
             return f"Memory {memory_id} deleted for user '{user_id}'."
-        return f"Memory {memory_id} not found or already deleted for user '{user_id}'."
+        return f"Memory {memory_id} not found or already deleted."
     else:
         return "Please specify either a memory_id to delete or set delete_all=True."
 
 
 @tool
-async def gdpr_export_memories(config: RunnableConfig) -> str:
-    """Export all stored data for the current technician in portable format (GDPR Art. 20).
+async def gdpr_export_memories(user_id: str = "anonymous") -> str:
+    """Export all stored data for a technician in portable format (GDPR Art. 20).
 
-    Use this when a technician requests a copy of all their stored data.
+    Args:
+        user_id: The technician's user ID
     """
-    _, user_id, _ = _get_context_ids(config)
+    from agent_server.gdpr import export_memories
     export = await export_memories(user_id)
     return json.dumps(export, indent=2, default=str)
