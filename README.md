@@ -102,11 +102,11 @@ Edit `app.yaml` and replace the placeholder values:
 ```yaml
 - name: LAKEBASE_AUTOSCALING_ENDPOINT
   value: "projects/<your-project>/branches/<your-branch>/endpoints/<your-endpoint>"
-- name: MLFLOW_EXPERIMENT_ID
-  value: "<your-experiment-id>"
 - name: LLM_ENDPOINT
   value: "databricks-claude-sonnet-4-5"   # or your preferred model
 ```
+
+> **MLflow Experiment**: The app auto-creates an experiment at `/Users/<your-email>/maint-bot-app` on first startup. No manual step needed. To override, set `MLFLOW_EXPERIMENT_ID` in `app.yaml`.
 
 ### Step 4: Update `databricks.yml`
 
@@ -114,15 +114,7 @@ Edit `databricks.yml`:
 - Set `workspace.host` under your target to your workspace URL
 - Update the env vars to match your `app.yaml`
 
-### Step 5: Create an MLflow Experiment
-
-```bash
-databricks experiments create-experiment /Users/<your-email>/maint-bot-app --profile <your-profile>
-```
-
-Note the experiment ID and update `.env`, `app.yaml`, and `databricks.yml`.
-
-### Step 6: Deploy the Bundle
+### Step 5: Deploy the Bundle
 
 ```bash
 databricks bundle validate --profile <your-profile>
@@ -132,7 +124,7 @@ databricks bundle run maint_bot_app --profile <your-profile>
 
 Wait for the app to start. Note the app URL from the output.
 
-### Step 7: Add Lakebase Postgres Resource (CRITICAL)
+### Step 6: Add Lakebase Postgres Resource (CRITICAL)
 
 > **Autoscaling Lakebase instances require this manual step after every `bundle deploy`** because `databricks bundle deploy` resets app resources.
 
@@ -169,7 +161,7 @@ for db in dbs:
 # Use the one where postgres_database = "databricks_postgres"
 ```
 
-### Step 8: Grant Lakebase Permissions (3 Layers)
+### Step 7: Grant Lakebase Permissions (3 Layers)
 
 Get the app's service principal client ID:
 ```bash
@@ -216,7 +208,7 @@ GRANT ALL ON SCHEMA maint_bot TO "<SP_CLIENT_ID>";
 ALTER DEFAULT PRIVILEGES IN SCHEMA maint_bot GRANT ALL ON TABLES TO "<SP_CLIENT_ID>";
 ```
 
-### Step 9: Restart the App
+### Step 8: Restart the App
 
 After adding the resource and granting permissions, redeploy:
 
@@ -226,7 +218,7 @@ databricks apps deploy maint-bot-app \
     --profile <your-profile>
 ```
 
-### Step 10: Test
+### Step 9: Test
 
 ```python
 from databricks_openai import DatabricksOpenAI
@@ -270,9 +262,9 @@ curl -X POST http://localhost:8000/invocations \
 | Issue | Cause | Fix |
 |-------|-------|-----|
 | `password authentication failed for user '<SP-UUID>'` | SP role created manually via `CREATE ROLE` instead of `databricks_create_role` | Drop the role (`DROP ROLE "<SP-UUID>"`) and recreate via `grant_lakebase_permissions.py` |
-| `couldn't get a connection after 30.00 sec` | Postgres resource missing from app | Re-add via UI or SDK (Step 7) |
+| `couldn't get a connection after 30.00 sec` | Postgres resource missing from app | Re-add via UI or SDK (Step 6) |
 | `start-app` crashes | Frontend can't clone from GitHub in app container | Use `start-server` instead (backend-only, API at `/invocations`) |
-| `databricks bundle deploy` resets resources | Known limitation for autoscaling | Re-add resource after each `bundle deploy` (Step 7) |
+| `databricks bundle deploy` resets resources | Known limitation for autoscaling | Re-add resource after each `bundle deploy` (Step 6) |
 | Response takes 60+ seconds | Lakebase auth failing, agent falling back to stateless | Check logs at `/logz`, verify all 3 permission layers |
 | Response takes ~15 seconds | Normal — LLM inference + tool calls | Expected behavior |
 
