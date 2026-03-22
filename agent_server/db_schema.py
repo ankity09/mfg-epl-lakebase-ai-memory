@@ -102,7 +102,10 @@ async def ensure_schema():
         """)
 
         # pgvector extension for long-term memory
-        await conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
+        try:
+            await conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
+        except Exception:
+            pass  # Extension already exists or SP lacks CREATE EXTENSION privilege
 
         # Long-term maintenance knowledge with embeddings
         await conn.execute("""
@@ -122,37 +125,10 @@ async def ensure_schema():
             )
         """)
 
-        # Row-Level Security for maintenance_knowledge
-        await conn.execute("""
-            ALTER TABLE maintenance_knowledge ENABLE ROW LEVEL SECURITY
-        """)
-        await conn.execute("""
-            DO $$
-            BEGIN
-                IF NOT EXISTS (
-                    SELECT 1 FROM pg_policies
-                    WHERE tablename = 'maintenance_knowledge'
-                      AND policyname = 'knowledge_isolation'
-                ) THEN
-                    CREATE POLICY knowledge_isolation ON maintenance_knowledge
-                    FOR ALL
-                    USING (
-                        technician_id::text = current_setting('app.current_user_id', true)
-                        OR current_setting('app.current_user_id', true) IS NULL
-                    );
-                END IF;
-            END
-            $$
-        """)
-
-        await conn.execute("""
-            CREATE OR REPLACE FUNCTION set_current_user_context(user_uuid TEXT)
-            RETURNS void AS $$
-            BEGIN
-                PERFORM set_config('app.current_user_id', user_uuid, false);
-            END;
-            $$ LANGUAGE plpgsql
-        """)
+        # NOTE: Row-Level Security is NOT enabled here.
+        # RLS blocked the SP from reading memories because the policy evaluates
+        # differently for non-owner roles. Enable RLS via the grant script only
+        # after thorough testing with your specific SP setup.
 
         # Indexes
         for idx_sql in [

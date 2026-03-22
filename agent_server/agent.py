@@ -95,12 +95,15 @@ Your role:
 - Flag safety concerns for high-severity issues
 - Be concise but thorough
 
-## Current Diagnostic Context
+## Current Session
+- Current User ID: {user_id}
 - Equipment: {equipment_id}
 - Issue Type: {issue_type}
 - Severity: {severity}
 - Working Diagnosis: {diagnosis}
 - Recommended Parts: {recommended_parts}
+
+IMPORTANT: When calling memory tools (get_maintenance_memory, save_maintenance_memory, gdpr_view_memories, gdpr_delete_memories, gdpr_export_memories), always pass user_id="{user_id}".
 {session_context}"""
 
 
@@ -154,7 +157,7 @@ def classify_issue_type(user_message: str) -> str:
 ############################################
 # Agent factory
 ############################################
-async def init_agent(checkpointer=None, memory_context: str = ""):
+async def init_agent(checkpointer=None, memory_context: str = "", user_id: str = "anonymous"):
     """Create the MaintBot LangGraph agent with all tools."""
     model = ChatDatabricks(endpoint=LLM_ENDPOINT)
 
@@ -173,6 +176,7 @@ async def init_agent(checkpointer=None, memory_context: str = ""):
         tools=tools,
         system_prompt=SYSTEM_PROMPT.format(
             user_memories=memory_context or "No relevant maintenance knowledge found.",
+            user_id=user_id,
             equipment_id="Not specified",
             issue_type="Not specified",
             severity="Not assessed",
@@ -352,14 +356,14 @@ async def stream_handler(
             ) as checkpointer:
                 await checkpointer.setup()
                 agent = await init_agent(
-                    checkpointer=checkpointer, memory_context=memory_context
+                    checkpointer=checkpointer, memory_context=memory_context, user_id=user_id
                 )
                 async for event in process_agent_astream_events(
                     agent.astream(input_state, config, stream_mode=["updates", "messages"])
                 ):
                     yield event
         else:
-            agent = await init_agent(memory_context=memory_context)
+            agent = await init_agent(memory_context=memory_context, user_id=user_id)
             async for event in process_agent_astream_events(
                 agent.astream(input_state, config, stream_mode=["updates", "messages"])
             ):
@@ -372,7 +376,7 @@ async def stream_handler(
             "password authentication", "couldn't get a connection", "connection pool",
         ]):
             logger.error(f"Lakebase checkpoint error, falling back to stateless: {e}")
-            agent = await init_agent(memory_context=memory_context)
+            agent = await init_agent(memory_context=memory_context, user_id=user_id)
             async for event in process_agent_astream_events(
                 agent.astream(input_state, config, stream_mode=["updates", "messages"])
             ):

@@ -45,13 +45,17 @@ async def get_maintenance_memory(
     if not tech_id:
         return "No maintenance knowledge available yet."
 
-    from agent_server.memory import format_memories_for_prompt, retrieve_memories_hybrid
-    memories = await retrieve_memories_hybrid(
-        technician_id=tech_id, query=query, limit=limit,
-    )
-    if not memories:
-        return "No relevant maintenance knowledge found for this query."
-    return format_memories_for_prompt(memories)
+    try:
+        from agent_server.memory import format_memories_for_prompt, retrieve_memories_hybrid
+        memories = await retrieve_memories_hybrid(
+            technician_id=tech_id, query=query, limit=limit,
+        )
+        if not memories:
+            return "No relevant maintenance knowledge found for this query."
+        return format_memories_for_prompt(memories)
+    except Exception as e:
+        logger.error(f"Memory retrieval error for tech={tech_id} query='{query}': {e}")
+        return f"Memory search failed: {str(e)[:200]}"
 
 
 @tool
