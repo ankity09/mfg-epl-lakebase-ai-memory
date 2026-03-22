@@ -2,7 +2,7 @@
 
 A step-by-step guide to demonstrate all MaintBot features. Use this in the chat UI or via the `databricks-openai` Python client.
 
-> **Tip:** When using the chat UI on Databricks Apps, the user's email is automatically resolved from `request.context.user_id` (injected by the Express frontend). No need to pass `user_id` manually. For API testing via `databricks-openai`, pass `user_id` in `custom_inputs`.
+> **Identity**: In the chat UI (Databricks Apps), your email is automatically resolved from the auth context — you never need to identify yourself. Each user only sees their own chat history and memories. When testing via `databricks-openai` API, pass `user_id` in `custom_inputs` to simulate a specific technician.
 
 ---
 
@@ -12,7 +12,7 @@ A step-by-step guide to demonstrate all MaintBot features. Use this in the chat 
 
 **Send:**
 ```
-I'm tech-001. I have a hydraulic pressure drop on HP-L4-001, severity is high.
+I have a hydraulic pressure drop on HP-L4-001, severity is high.
 The secondary cylinder O-rings might be worn.
 ```
 
@@ -66,16 +66,16 @@ Memory extraction complete: 3 items found, 3 new memories stored, 0 consolidated
 
 ### Message 4 — Recall Memory in a New Session
 
-Start a **new conversation** (refresh the page or use a new API call without `thread_id`).
+Start a **new conversation** (click "New chat" in the sidebar).
 
 **Send:**
 ```
-I'm tech-001. We're seeing pressure issues on HP-L4-001 again.
+We're seeing pressure issues on HP-L4-001 again.
 Any past maintenance history I should know about?
 ```
 
 **What to observe:**
-- `get_maintenance_memory` tool fires with `user_id: "tech-001"` and `query: "HP-L4-001 pressure issues"`
+- `get_maintenance_memory` tool fires with your email as `user_id` and `query: "HP-L4-001 pressure issues"`
 - Tool returns the saved memory about the suction strainer + metal shavings
 - Agent cites the past finding: "Based on past experience, HP-L4-001 had a clogged suction strainer..."
 - Response recommends checking the strainer first based on history
@@ -87,7 +87,7 @@ Any past maintenance history I should know about?
 ```
 
 **If memory recall fails (returns "No relevant maintenance knowledge found"):**
-- Check that `user_id` is being passed correctly (must match the user who saved)
+- Memories are scoped per user — you must be logged in as the same user who saved the memory
 - Verify memories exist: query `SELECT * FROM maint_bot.maintenance_knowledge` in SQL Editor
 - Check that the `vector` extension is installed: `SELECT extname FROM pg_extension`
 - Check logs at `/logz` for "Memory retrieval error" messages
@@ -104,7 +104,7 @@ What data do you have stored about me? I want to see all my maintenance memories
 ```
 
 **What to observe:**
-- `gdpr_view_memories` tool fires with `user_id: "tech-001"`
+- `gdpr_view_memories` tool fires with your authenticated email as `user_id`
 - Returns a list of all stored memories with IDs, types, equipment tags, and importance scores
 - Response formats the data in a readable way
 
@@ -152,6 +152,39 @@ rapid traverse. Severity is critical - we had to stop production.
 
 ---
 
+## Part 5: Chat History + Event Logging (UI)
+
+### Verifying Chat History in the UI
+
+1. Open the app in a browser: `https://<your-app-url>/`
+2. The sidebar should show **only your conversations** grouped by date (e.g., "Today", "Yesterday")
+3. Send a message in a new chat, then open a second new chat and send a different message
+4. Refresh the page — both conversations should appear in the sidebar
+5. Click on an old conversation — all messages should reload
+6. Another user logging in sees only their own conversations — chat history is fully isolated per user
+
+**If the sidebar says "Chat history is disabled":**
+- Check logs at `/logz` for `[start_app] PGHOST=...` — if missing, the Lakebase endpoint couldn't be resolved
+- Verify `LAKEBASE_AUTOSCALING_ENDPOINT` or `LAKEBASE_AUTOSCALING_PROJECT` + `BRANCH` are set in `app.yaml`
+
+### Verifying Event Logging
+
+After sending messages via the UI or API, verify events are recorded:
+
+```sql
+-- Should show both user and assistant messages with token counts
+SELECT role, user_id, token_count, LEFT(content, 60) as preview, created_at
+FROM maint_bot.work_order_events ORDER BY created_at DESC LIMIT 10;
+```
+
+Expected output:
+- `user` rows should have the real email in `user_id` (e.g., `alice@company.com`)
+- `assistant` rows have `NULL` user_id
+- Both have non-zero `token_count`
+- `work_order_id` matches the frontend's conversation UUID
+
+---
+
 ## Verifying Features via Database
 
 Connect to the Lakebase endpoint (SQL Editor or psql) and run:
@@ -160,13 +193,13 @@ Connect to the Lakebase endpoint (SQL Editor or psql) and run:
 -- Set search path
 SET search_path TO maint_bot, public;
 
--- Check technicians created
+-- Check technicians created (external_id = authenticated email)
 SELECT id, external_id, created_at FROM technicians;
 
--- Check work orders (one per conversation)
+-- Check work orders (one per conversation, id = frontend conversation UUID)
 SELECT id, technician_id, equipment_id, status, created_at FROM work_orders ORDER BY created_at DESC;
 
--- Check stored memories (long-term)
+-- Check stored memories (long-term, scoped per technician)
 SELECT id, content, memory_type, equipment_tag, importance, is_active, created_at
 FROM maintenance_knowledge ORDER BY created_at DESC;
 
@@ -182,6 +215,8 @@ FROM maintenance_knowledge LIMIT 5;
 ---
 
 ## Verifying via Python Client
+
+> **Note:** When using the API directly, pass `user_id` in `custom_inputs` to simulate a specific user. In the chat UI this is handled automatically from the auth context.
 
 ```python
 from databricks_openai import DatabricksOpenAI
@@ -224,38 +259,6 @@ for item in r4.output:
             if hasattr(c, "text"):
                 print(f"Response: {c.text[:300]}")
 ```
-
----
-
-## Part 5: Chat History + Event Logging (UI)
-
-### Verifying Chat History in the UI
-
-1. Open the app in a browser: `https://<your-app-url>/`
-2. The sidebar should show past conversations grouped by date (e.g., "Today", "Yesterday")
-3. Send a message in a new chat, then open a second new chat and send a different message
-4. Refresh the page — both conversations should appear in the sidebar
-5. Click on an old conversation — all messages should reload
-
-**If the sidebar says "Chat history is disabled":**
-- Check logs at `/logz` for `[start_app] PGHOST=...` — if missing, the Lakebase endpoint couldn't be resolved
-- Verify `LAKEBASE_AUTOSCALING_ENDPOINT` or `LAKEBASE_AUTOSCALING_PROJECT` + `BRANCH` are set in `app.yaml`
-
-### Verifying Event Logging
-
-After sending messages via the UI or API, verify events are recorded:
-
-```sql
--- Should show both user and assistant messages with token counts
-SELECT role, user_id, token_count, LEFT(content, 60) as preview, created_at
-FROM maint_bot.work_order_events ORDER BY created_at DESC LIMIT 10;
-```
-
-Expected output:
-- `user` rows should have the real email in `user_id` (e.g., `alice@company.com`)
-- `assistant` rows have `NULL` user_id
-- Both have non-zero `token_count`
-- `work_order_id` matches the frontend's conversation UUID
 
 ---
 
