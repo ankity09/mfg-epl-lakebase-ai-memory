@@ -60,22 +60,23 @@ async def ensure_schema():
         return
 
     async with get_async_connection() as conn:
-        # Create dedicated schema (search_path already set by get_async_connection)
-        await conn.execute(f"CREATE SCHEMA IF NOT EXISTS {SCHEMA_NAME}")
-
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS technicians (
+        # DDL statements (CREATE SCHEMA/TABLE/INDEX, ALTER TABLE) require
+        # ownership or CREATE privilege that the SP typically doesn't have.
+        # The admin grant script pre-creates all schemas, tables, and indexes,
+        # so these are all no-ops in production.  We run each in its own
+        # try/except so permission errors don't block the SP from using the
+        # tables it already has access to.
+        ddl_statements = [
+            f"CREATE SCHEMA IF NOT EXISTS {SCHEMA_NAME}",
+            """CREATE TABLE IF NOT EXISTS technicians (
                 id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                 external_id VARCHAR(255) UNIQUE NOT NULL,
                 display_name VARCHAR(255),
                 specializations JSONB DEFAULT '[]'::jsonb,
                 created_at TIMESTAMP DEFAULT NOW(),
                 updated_at TIMESTAMP DEFAULT NOW()
-            )
-        """)
-
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS work_orders (
+            )""",
+            """CREATE TABLE IF NOT EXISTS work_orders (
                 id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                 technician_id UUID REFERENCES technicians(id),
                 agent_id VARCHAR(100) DEFAULT 'maint-bot',
@@ -86,30 +87,20 @@ async def ensure_schema():
                 max_tokens INTEGER DEFAULT 8000,
                 created_at TIMESTAMP DEFAULT NOW(),
                 ended_at TIMESTAMP
-            )
-        """)
-
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS work_order_events (
+            )""",
+            """CREATE TABLE IF NOT EXISTS work_order_events (
                 id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                 work_order_id UUID REFERENCES work_orders(id),
                 role VARCHAR(20) NOT NULL,
                 content TEXT NOT NULL,
+                user_id VARCHAR(255),
                 token_count INTEGER DEFAULT 0,
                 is_compacted BOOLEAN DEFAULT FALSE,
                 created_at TIMESTAMP DEFAULT NOW()
-            )
-        """)
-
-        # pgvector extension for long-term memory
-        try:
-            await conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
-        except Exception:
-            pass  # Extension already exists or SP lacks CREATE EXTENSION privilege
-
-        # Long-term maintenance knowledge with embeddings
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS maintenance_knowledge (
+            )""",
+            "ALTER TABLE work_order_events ADD COLUMN IF NOT EXISTS user_id VARCHAR(255)",
+            "CREATE EXTENSION IF NOT EXISTS vector",
+            """CREATE TABLE IF NOT EXISTS maintenance_knowledge (
                 id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                 technician_id UUID REFERENCES technicians(id),
                 content TEXT NOT NULL,
@@ -122,16 +113,7 @@ async def ensure_schema():
                 access_count INTEGER DEFAULT 0,
                 created_at TIMESTAMP DEFAULT NOW(),
                 updated_at TIMESTAMP DEFAULT NOW()
-            )
-        """)
-
-        # NOTE: Row-Level Security is NOT enabled here.
-        # RLS blocked the SP from reading memories because the policy evaluates
-        # differently for non-owner roles. Enable RLS via the grant script only
-        # after thorough testing with your specific SP setup.
-
-        # Indexes
-        for idx_sql in [
+            )""",
             "CREATE INDEX IF NOT EXISTS idx_events_work_order ON work_order_events(work_order_id)",
             "CREATE INDEX IF NOT EXISTS idx_events_not_compacted ON work_order_events(work_order_id) WHERE is_compacted = FALSE",
             "CREATE INDEX IF NOT EXISTS idx_work_orders_technician ON work_orders(technician_id)",
@@ -140,8 +122,17 @@ async def ensure_schema():
             "CREATE INDEX IF NOT EXISTS idx_knowledge_type ON maintenance_knowledge(memory_type)",
             "CREATE INDEX IF NOT EXISTS idx_knowledge_equipment ON maintenance_knowledge(equipment_tag)",
             "CREATE INDEX IF NOT EXISTS idx_knowledge_active ON maintenance_knowledge(is_active) WHERE is_active = TRUE",
-        ]:
-            await conn.execute(idx_sql)
+        ]
+
+        for sql in ddl_statements:
+            try:
+                await conn.execute(sql)
+            except Exception as e:
+                if "permission denied" in str(e).lower() or "must be owner" in str(e).lower():
+                    logger.debug(f"DDL skipped (expected for SP): {e}")
+                    await conn.rollback()
+                else:
+                    raise
 
     _schema_initialized = True
     logger.info("MaintBot custom schema initialized")
@@ -172,19 +163,33 @@ async def get_or_create_technician(external_id: str) -> Dict[str, Any]:
 
 async def create_work_order(
     technician_id: str,
+    work_order_id: Optional[str] = None,
     equipment_id: Optional[str] = None,
     priority: str = "medium",
     max_tokens: int = 8000,
 ) -> Dict[str, Any]:
-    """Create a new work order (conversation session)."""
+    """Create a new work order (conversation session).
+
+    If work_order_id is provided, use it as the primary key (e.g. frontend
+    conversation UUID) instead of generating a new one with gen_random_uuid().
+    """
     async with get_async_connection() as conn:
-        row = await (
-            await conn.execute(
-                "INSERT INTO work_orders (technician_id, agent_id, equipment_id, priority, max_tokens) "
-                "VALUES (%s, 'maint-bot', %s, %s, %s) RETURNING *",
-                (technician_id, equipment_id, priority, max_tokens),
-            )
-        ).fetchone()
+        if work_order_id:
+            row = await (
+                await conn.execute(
+                    "INSERT INTO work_orders (id, technician_id, agent_id, equipment_id, priority, max_tokens) "
+                    "VALUES (%s::uuid, %s, 'maint-bot', %s, %s, %s) RETURNING *",
+                    (work_order_id, technician_id, equipment_id, priority, max_tokens),
+                )
+            ).fetchone()
+        else:
+            row = await (
+                await conn.execute(
+                    "INSERT INTO work_orders (technician_id, agent_id, equipment_id, priority, max_tokens) "
+                    "VALUES (%s, 'maint-bot', %s, %s, %s) RETURNING *",
+                    (technician_id, equipment_id, priority, max_tokens),
+                )
+            ).fetchone()
         return dict(row)
 
 
@@ -205,14 +210,15 @@ async def log_event(
     role: str,
     content: str,
     token_count: int = 0,
+    user_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Log a message event to work_order_events with token count."""
+    """Log a message event to work_order_events with token count and optional user_id."""
     async with get_async_connection() as conn:
         row = await (
             await conn.execute(
-                "INSERT INTO work_order_events (work_order_id, role, content, token_count) "
-                "VALUES (%s, %s, %s, %s) RETURNING *",
-                (work_order_id, role, content, token_count),
+                "INSERT INTO work_order_events (work_order_id, role, content, token_count, user_id) "
+                "VALUES (%s, %s, %s, %s, %s) RETURNING *",
+                (work_order_id, role, content, token_count, user_id),
             )
         ).fetchone()
         return dict(row)

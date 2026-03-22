@@ -27,6 +27,44 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+
+def _resolve_lakebase_pg_env():
+    """Set PG* env vars from Lakebase config so the frontend can connect."""
+    if os.environ.get("PGHOST") or os.environ.get("POSTGRES_URL"):
+        return
+    endpoint = os.environ.get("LAKEBASE_AUTOSCALING_ENDPOINT")
+    project = os.environ.get("LAKEBASE_AUTOSCALING_PROJECT")
+    branch = os.environ.get("LAKEBASE_AUTOSCALING_BRANCH")
+    if not (endpoint or (project and branch)):
+        return
+    try:
+        from databricks.sdk import WorkspaceClient
+
+        w = WorkspaceClient()
+        if not endpoint:
+            eps = list(
+                w.postgres.list_endpoints(
+                    parent=f"projects/{project}/branches/{branch}"
+                )
+            )
+            if eps:
+                endpoint = eps[0].name
+        if endpoint:
+            host = w.postgres.get_endpoint(name=endpoint).status.hosts.host
+            os.environ["PGHOST"] = host
+            os.environ["PGDATABASE"] = "databricks_postgres"
+            os.environ["PGSSLMODE"] = "require"
+            # PGUSER is required by the frontend's OAuth auth path (SP in Apps).
+            # For CLI auth (local dev), the frontend resolves it automatically.
+            if not os.environ.get("PGUSER"):
+                sp_client_id = os.environ.get("DATABRICKS_CLIENT_ID")
+                if sp_client_id:
+                    os.environ["PGUSER"] = sp_client_id
+            print(f"[start_app] PGHOST={host} (frontend chat history enabled)")
+    except Exception as e:
+        print(f"[start_app] Could not resolve Lakebase for frontend: {e}")
+
+
 # Readiness patterns
 BACKEND_READY = [r"Uvicorn running on", r"Application startup complete", r"Started server process"]
 FRONTEND_READY = [r"Server is running on http://localhost"]
@@ -248,6 +286,11 @@ class ProcessManager:
                     if result.returncode != 0:
                         print(f"npm {desc} failed: {result.stderr}")
                         return 1
+
+                # Set PG* env vars AFTER npm build (build runs migrations that
+                # fail without CREATE SCHEMA privilege) but BEFORE npm start so
+                # the frontend runtime can connect to Lakebase for chat history.
+                _resolve_lakebase_pg_env()
 
                 self.frontend_process = self.start_process(
                     ["npm", "run", "start"],

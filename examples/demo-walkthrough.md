@@ -2,7 +2,7 @@
 
 A step-by-step guide to demonstrate all MaintBot features. Use this in the chat UI or via the `databricks-openai` Python client.
 
-> **Tip:** When using the chat UI, pass `user_id` in `custom_inputs` via the API. In the chat UI, the agent uses "anonymous" by default. For the full memory demo, use the Python client with `custom_inputs: {"user_id": "tech-001"}`.
+> **Tip:** When using the chat UI on Databricks Apps, the user's email is automatically resolved from `request.context.user_id` (injected by the Express frontend). No need to pass `user_id` manually. For API testing via `databricks-openai`, pass `user_id` in `custom_inputs`.
 
 ---
 
@@ -170,8 +170,8 @@ SELECT id, technician_id, equipment_id, status, created_at FROM work_orders ORDE
 SELECT id, content, memory_type, equipment_tag, importance, is_active, created_at
 FROM maintenance_knowledge ORDER BY created_at DESC;
 
--- Check event log (token tracking)
-SELECT work_order_id, role, token_count, LEFT(content, 80) as preview, created_at
+-- Check event log (token tracking + user identity)
+SELECT work_order_id, role, user_id, token_count, LEFT(content, 80) as preview, created_at
 FROM work_order_events ORDER BY created_at DESC LIMIT 10;
 
 -- Check pgvector is working (embedding dimensions)
@@ -224,6 +224,38 @@ for item in r4.output:
             if hasattr(c, "text"):
                 print(f"Response: {c.text[:300]}")
 ```
+
+---
+
+## Part 5: Chat History + Event Logging (UI)
+
+### Verifying Chat History in the UI
+
+1. Open the app in a browser: `https://<your-app-url>/`
+2. The sidebar should show past conversations grouped by date (e.g., "Today", "Yesterday")
+3. Send a message in a new chat, then open a second new chat and send a different message
+4. Refresh the page — both conversations should appear in the sidebar
+5. Click on an old conversation — all messages should reload
+
+**If the sidebar says "Chat history is disabled":**
+- Check logs at `/logz` for `[start_app] PGHOST=...` — if missing, the Lakebase endpoint couldn't be resolved
+- Verify `LAKEBASE_AUTOSCALING_ENDPOINT` or `LAKEBASE_AUTOSCALING_PROJECT` + `BRANCH` are set in `app.yaml`
+
+### Verifying Event Logging
+
+After sending messages via the UI or API, verify events are recorded:
+
+```sql
+-- Should show both user and assistant messages with token counts
+SELECT role, user_id, token_count, LEFT(content, 60) as preview, created_at
+FROM maint_bot.work_order_events ORDER BY created_at DESC LIMIT 10;
+```
+
+Expected output:
+- `user` rows should have the real email in `user_id` (e.g., `alice@company.com`)
+- `assistant` rows have `NULL` user_id
+- Both have non-zero `token_count`
+- `work_order_id` matches the frontend's conversation UUID
 
 ---
 

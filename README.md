@@ -12,6 +12,8 @@ MaintBot helps manufacturing technicians diagnose equipment issues through multi
 - **Custom session tracking**: technicians, work orders, event logging with token counting
 - **Compaction**: 3 strategies (summarize, last_n, truncate) to manage context windows
 - **PII redaction**: 5 patterns (phone, email, SSN, badge, extension) applied before storage
+- **Chat UI with history**: frontend sidebar shows past conversations, grouped by date
+- **User identity resolution**: `request.context.user_id` from Databricks Apps auth, with header/custom_input fallbacks
 - **Graceful degradation**: works in stateless mode if Lakebase is unavailable
 
 ## Architecture
@@ -52,8 +54,8 @@ lakebase-mfg-epl-apps/
 │   ├── pii.py                # PII redaction patterns
 │   └── gdpr.py               # GDPR Art. 15/17/20 controls
 ├── scripts/
-│   ├── start_app.py          # Process manager for backend+frontend
-│   └── grant_lakebase_permissions.py  # 3-layer permission grants
+│   ├── start_app.py          # Process manager for backend+frontend, Lakebase PG env resolution
+│   └── grant_lakebase_permissions.py  # 3-layer permission grants + schema/table pre-creation
 ├── app.yaml                  # Databricks Apps config
 ├── databricks.yml            # DABs bundle definition
 ├── pyproject.toml            # Dependencies
@@ -265,6 +267,10 @@ curl -X POST http://localhost:8000/invocations \
 | `couldn't get a connection after 30.00 sec` | Postgres resource missing from app | Re-add via UI or SDK (Step 6) |
 | `start-app` crashes | Frontend can't clone from GitHub in app container | Use `start-server` instead (backend-only, API at `/invocations`) |
 | `databricks bundle deploy` resets resources | Known limitation for autoscaling | Re-add resource after each `bundle deploy` (Step 6) |
+| Chat history sidebar says "disabled" | Frontend needs `PGDATABASE` env var to enable chat history | `start_app.py` auto-resolves this from Lakebase config. Verify `[start_app] PGHOST=...` appears in logs |
+| `Custom table setup failed: permission denied for database` | SP lacks CREATE SCHEMA/TABLE privilege (normal after fresh deploy) | Run `grant_lakebase_permissions.py` to pre-create schemas and grant access |
+| `PGUSER environment variable must be set` | Frontend OAuth auth requires PGUSER during npm build migration | `start_app.py` sets `PGUSER` from `DATABRICKS_CLIENT_ID` automatically; PG vars are set after build to avoid migration issues |
+| Events not logged (0 rows in `work_order_events`) | Output items are dicts, not objects — `hasattr(item, "content")` fails | Fixed: use `item.get("content")` for dict-style access |
 | Response takes 60+ seconds | Lakebase auth failing, agent falling back to stateless | Check logs at `/logz`, verify all 3 permission layers |
 | Response takes ~15 seconds | Normal — LLM inference + tool calls | Expected behavior |
 
@@ -277,3 +283,9 @@ curl -X POST http://localhost:8000/invocations \
 3. **Best-effort DB operations**: All custom table operations (session tracking, event logging, memory retrieval) are wrapped in try/except. If Lakebase is unavailable, the agent works in stateless mode.
 
 4. **`databricks_create_role` only**: Never use raw `CREATE ROLE` SQL for service principals. The `databricks_auth` extension's `databricks_create_role()` function sets up the OAuth token mapping required for JWT authentication.
+
+5. **Event logging via `try/finally` + `asyncio.ensure_future()`**: The `@stream()` decorator closes async generators via `aclose()`, so code after the last `yield` never runs. Post-turn tracking is scheduled as a fire-and-forget background task in the `finally` block, which executes reliably for both the streaming (UI) and invoke (API) paths.
+
+6. **Permission-resilient DDL**: `ensure_schema()` wraps each DDL statement (CREATE SCHEMA, CREATE TABLE, ALTER TABLE, CREATE INDEX) in individual try/except blocks. The SP typically lacks CREATE privilege on the database, but the grant script pre-creates everything, so permission errors on DDL are safe to ignore.
+
+7. **Frontend PG env resolution**: `start_app.py` resolves `PGHOST`/`PGDATABASE`/`PGSSLMODE` from Lakebase config **after** `npm run build` (to avoid triggering migration errors) but **before** `npm run start` (so the runtime can connect). `PGUSER` is set from `DATABRICKS_CLIENT_ID` for SP OAuth auth.

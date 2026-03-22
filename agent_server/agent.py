@@ -9,6 +9,7 @@ Database operations gracefully degrade — the agent works without Lakebase,
 falling back to stateless mode if the connection fails.
 """
 
+import asyncio
 import logging
 import os
 import re
@@ -21,7 +22,7 @@ from langchain.agents import create_agent
 from langchain_core.messages import AnyMessage
 from langchain_core.tools import tool
 from langgraph.graph.message import add_messages
-from mlflow.genai.agent_server import invoke, stream
+from mlflow.genai.agent_server import get_request_headers, invoke, stream
 from mlflow.types.responses import (
     ResponsesAgentRequest,
     ResponsesAgentResponse,
@@ -201,13 +202,12 @@ def _extract_user_message(request: ResponsesAgentRequest) -> str:
 ############################################
 # Custom table helpers (best-effort)
 ############################################
-async def _setup_session(request: ResponsesAgentRequest, thread_id: str):
+async def _setup_session(request: ResponsesAgentRequest, thread_id: str, user_id: str):
     """
     Set up custom tables, resolve technician + work order.
     Returns (thread_id, tech_id, user_id) or (thread_id, None, user_id) if DB unavailable.
     """
     ci = dict(request.custom_inputs or {})
-    user_id = ci.get("user_id", "anonymous")
     equipment_id = ci.get("equipment_id")
 
     try:
@@ -220,9 +220,9 @@ async def _setup_session(request: ResponsesAgentRequest, thread_id: str):
         if wo is None:
             wo = await create_work_order(
                 technician_id=tech_id,
+                work_order_id=thread_id,
                 equipment_id=equipment_id,
             )
-            thread_id = str(wo["id"])
 
         return thread_id, tech_id, user_id
     except Exception as e:
@@ -235,6 +235,7 @@ async def _post_turn_tracking(
     user_message: str,
     response_text: str,
     max_tokens: int = 8000,
+    user_id: Optional[str] = None,
 ):
     """Log events and run compaction check. Best-effort — failures are logged, not raised."""
     try:
@@ -244,7 +245,7 @@ async def _post_turn_tracking(
         user_tokens = count_tokens(user_message)
         response_tokens = count_tokens(response_text)
 
-        await log_event(thread_id, "user", user_message, token_count=user_tokens)
+        await log_event(thread_id, "user", user_message, token_count=user_tokens, user_id=user_id)
         await log_event(thread_id, "assistant", response_text, token_count=response_tokens)
 
         result = await compact_conversation(thread_id, max_tokens=max_tokens)
@@ -270,26 +271,6 @@ async def invoke_handler(request: ResponsesAgentRequest) -> ResponsesAgentRespon
         if event.type == "response.output_item.done":
             outputs.append(event.item)
 
-    # Post-turn tracking (best-effort)
-    response_text = ""
-    for item in outputs:
-        if hasattr(item, "content"):
-            for c in item.content:
-                if hasattr(c, "text"):
-                    response_text += c.text
-
-    user_message = _extract_user_message(request)
-    if user_message and response_text:
-        max_tokens = 8000
-        try:
-            _, _, _, get_work_order, _, _ = _import_db()
-            wo = await get_work_order(thread_id)
-            if wo:
-                max_tokens = wo["max_tokens"]
-        except Exception:
-            pass
-        await _post_turn_tracking(thread_id, user_message, response_text, max_tokens)
-
     return ResponsesAgentResponse(
         output=outputs,
         custom_outputs={"thread_id": thread_id},
@@ -305,8 +286,20 @@ async def stream_handler(
 
     user_message = _extract_user_message(request)
 
+    # Resolve user identity from request context (injected by the Express frontend
+    # as body.context.user_id), fall back to headers, custom_inputs, then "anonymous"
+    ci = dict(request.custom_inputs or {})
+    ctx = request.context
+    headers = get_request_headers()
+    user_id = (
+        (ctx.user_id if ctx else None)
+        or headers.get("x-forwarded-email")
+        or headers.get("x-databricks-user-id")
+        or ci.get("user_id", "anonymous")
+    )
+
     # Set up custom tables + resolve technician (best-effort)
-    thread_id, tech_id, user_id = await _setup_session(request, thread_id)
+    thread_id, tech_id, user_id = await _setup_session(request, thread_id, user_id)
 
     # Retrieve long-term memories (best-effort)
     memory_context = ""
@@ -346,6 +339,21 @@ async def stream_handler(
         "custom_inputs": dict(request.custom_inputs or {}),
     }
 
+    # Capture assistant response text for post-turn tracking
+    response_parts: list[str] = []
+
+    def _capture(event):
+        if event.type == "response.output_item.done":
+            item = event.item if hasattr(event, "item") else (event.get("item") if isinstance(event, dict) else None)
+            if item:
+                content = item.get("content") if isinstance(item, dict) else getattr(item, "content", None)
+                if content:
+                    for c in (content if isinstance(content, list) else [content]):
+                        text = c.get("text") if isinstance(c, dict) else getattr(c, "text", None)
+                        if text:
+                            response_parts.append(text)
+        return event
+
     try:
         if _has_lakebase:
             async with AsyncCheckpointSaver(
@@ -361,13 +369,13 @@ async def stream_handler(
                 async for event in process_agent_astream_events(
                     agent.astream(input_state, config, stream_mode=["updates", "messages"])
                 ):
-                    yield event
+                    yield _capture(event)
         else:
             agent = await init_agent(memory_context=memory_context, user_id=user_id)
             async for event in process_agent_astream_events(
                 agent.astream(input_state, config, stream_mode=["updates", "messages"])
             ):
-                yield event
+                yield _capture(event)
 
     except Exception as e:
         error_msg = str(e).lower()
@@ -380,6 +388,29 @@ async def stream_handler(
             async for event in process_agent_astream_events(
                 agent.astream(input_state, config, stream_mode=["updates", "messages"])
             ):
-                yield event
+                yield _capture(event)
         else:
             raise
+
+    finally:
+        # Schedule post-turn tracking as a fire-and-forget background task.
+        # Code after the last yield in an async generator doesn't run reliably
+        # (the @stream() decorator closes the generator via aclose()), but
+        # the finally block always executes and ensure_future() is non-blocking.
+        response_text = "".join(response_parts)
+        if user_message and response_text:
+            async def _do_tracking():
+                max_tokens = 8000
+                try:
+                    _, _, _, get_work_order, _, _ = _import_db()
+                    wo = await get_work_order(thread_id)
+                    if wo:
+                        max_tokens = wo["max_tokens"]
+                except Exception:
+                    pass
+                await _post_turn_tracking(thread_id, user_message, response_text, max_tokens, user_id=user_id)
+
+            try:
+                asyncio.ensure_future(_do_tracking())
+            except Exception as e:
+                logger.warning(f"Could not schedule post-turn tracking: {e}")
