@@ -46,7 +46,7 @@ async def get_maintenance_memory(
         return "No maintenance knowledge available yet."
 
     try:
-        from agent_server.memory import format_memories_for_prompt, retrieve_memories_hybrid
+        from agent_server.memory_router import format_memories_for_prompt, retrieve_memories_hybrid
         memories = await retrieve_memories_hybrid(
             technician_id=tech_id, query=query, limit=limit,
         )
@@ -76,7 +76,7 @@ async def save_maintenance_memory(
     if not tech_id:
         return "Cannot save memories: user context not available."
 
-    from agent_server.memory import process_conversation_memories
+    from agent_server.memory_router import process_conversation_memories
     result = await process_conversation_memories(
         technician_id=tech_id,
         conversation_text=conversation_text,

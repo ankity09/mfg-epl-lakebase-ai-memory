@@ -40,6 +40,16 @@ resources:
             value: "0.8"
           - name: COMPACT_KEEP_TURNS
             value: "5"
+          # Memory backend: "pgvector" or "databricks_vs"
+          - name: MEMORY_BACKEND
+            value: "pgvector"
+          # Databricks Vector Search config (only used when MEMORY_BACKEND=databricks_vs)
+          - name: VS_ENDPOINT_NAME
+            value: "mas-3876475e-endpoint"
+          - name: VS_CATALOG
+            value: "ankit_yadav"
+          - name: VS_SCHEMA
+            value: "maint_bot"
 
       # Autoscaling postgres resource must be added via API after deploy
       # See: scripts/grant_lakebase_permissions.py

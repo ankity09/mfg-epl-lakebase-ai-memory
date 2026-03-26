@@ -122,6 +122,8 @@ async def ensure_schema():
             "CREATE INDEX IF NOT EXISTS idx_knowledge_type ON maintenance_knowledge(memory_type)",
             "CREATE INDEX IF NOT EXISTS idx_knowledge_equipment ON maintenance_knowledge(equipment_tag)",
             "CREATE INDEX IF NOT EXISTS idx_knowledge_active ON maintenance_knowledge(is_active) WHERE is_active = TRUE",
+            # HNSW index for faster approximate nearest neighbor search
+            "CREATE INDEX IF NOT EXISTS idx_knowledge_embedding_hnsw ON maintenance_knowledge USING hnsw (embedding vector_cosine_ops) WITH (m = 16, ef_construction = 64)",
         ]
 
         for sql in ddl_statements:

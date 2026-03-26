@@ -274,6 +274,19 @@ curl -X POST http://localhost:8000/invocations \
 | Response takes 60+ seconds | Lakebase auth failing, agent falling back to stateless | Check logs at `/logz`, verify all 3 permission layers |
 | Response takes ~15 seconds | Normal — LLM inference + tool calls | Expected behavior |
 
+## Related Resources
+
+MaintBot extends the official Databricks LangGraph app templates with domain-specific features, pluggable vector backends, and enterprise-grade memory management:
+
+| Template | Description | What MaintBot Adds |
+|----------|-------------|-------------------|
+| [agent-langgraph-short-term-memory](https://github.com/databricks/app-templates/tree/main/agent-langgraph-short-term-memory) | Conversation persistence via AsyncCheckpointSaver | Token-aware compaction (3 strategies), custom session tracking tables, event logging |
+| [agent-langgraph-long-term-memory](https://github.com/databricks/app-templates/tree/main/agent-langgraph-long-term-memory) | Long-term knowledge via AsyncDatabricksStore | Hybrid scoring (similarity + recency + importance), LLM-driven deduplication/consolidation, PII redaction, full GDPR controls, pluggable vector backend (pgvector + Databricks Vector Search) |
+
+For a detailed feature-by-feature comparison, see [docs/FEATURE_COMPARISON.md](docs/FEATURE_COMPARISON.md).
+
+For testing and benchmarking the memory backends, see [tests/TESTING_GUIDE.md](tests/TESTING_GUIDE.md).
+
 ## Key Design Decisions
 
 1. **`AsyncLakebasePool` for custom tables**: Same connection mechanism as `AsyncCheckpointSaver`. Custom tables live in `databricks_postgres.maint_bot` schema (not a separate database) because `AsyncLakebasePool` hardcodes `dbname=databricks_postgres`.

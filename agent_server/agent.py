@@ -45,7 +45,7 @@ def _import_db():
     return ensure_schema, get_or_create_technician, create_work_order, get_work_order, log_event, get_events
 
 def _import_memory():
-    from agent_server.memory import format_memories_for_prompt, retrieve_memories_hybrid
+    from agent_server.memory_router import format_memories_for_prompt, retrieve_memories_hybrid
     return format_memories_for_prompt, retrieve_memories_hybrid
 
 def _import_memory_tools():
